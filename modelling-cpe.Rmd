@@ -1,0 +1,389 @@
+---
+title: "modelling CPE"
+author: "Henry"
+date: '`r format(Sys.Date(), "%Y-%B-%d")`'
+output: 
+  html_document:
+    highlight: zenburn
+    theme: united
+    df_print: paged
+    toc: yes
+    code_folding: hide
+    code_download: true
+    #fig_width: 17
+    #fig_height: 7
+---
+
+<style>
+slides > slide.backdrop {
+  background: white;
+}
+</style>
+
+<style>
+.column-left{
+  float: left;
+  width: 76%;
+  text-align: left;
+}
+.column-right{
+  float: right;
+  width: 24%;
+  text-align: right;
+}
+</style>
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+# 0. Set up libraries
+packages <- c("ggplot2", "tidyverse", "gridExtra", "ggthemes", "car", "radiant")
+
+for (p in packages) {
+  if ((p %in% rownames(installed.packages())) == FALSE) {
+    install.packages(p, dependencies = TRUE)
+  }
+  library(p, character.only = TRUE)
+}
+```
+
+
+```{r}
+carrier_names <- readRDS("~/git/airline-pricing/data/carrier_names.rds")
+ticket_19 <- readRDS("~/git/airline-pricing/data/ticket_2019.rds") %>%
+  mutate(
+    Quarter = as.factor(Quarter),
+    RoundTrip = as.factor(RoundTrip),
+    OnLine = as.factor(OnLine),
+    DistanceGroup = as.factor(DistanceGroup)
+  )
+
+# filter dollarCred = 1, and BulkFare = 0, only Southwest airlines only
+data <- ticket_19 %>%
+  filter(BulkFare == "0" & DollarCred == "1" & RPCarrier == "WN")
+
+glimpse(data)
+```
+
+
+```{r}
+dataWN <- ticket_19 %>%
+  filter(BulkFare == "0" & DollarCred == "1" & RPCarrier %in% c("AA", "DL", "UA", "WN", "NK", "G4", "B6", "F9"))
+```
+
+```{r}
+# Find out why?
+max(dataWN$Passengers)
+```
+
+## Itinerary count by origin Airport ID
+
+```{r}
+by_airport <- dataWN %>%
+  group_by(Origin) %>%
+  summarise(countItin = n()) %>%
+  ungroup() %>%
+  mutate(percCount = countItin * 100 / sum(countItin)) %>%
+  arrange(desc(countItin)) %>%
+  slice(1:10)
+```
+
+
+```{r}
+# slice(1:10)
+
+  ggplot( by_airport, aes(x = reorder(Origin, countItin), y = countItin)) +
+  geom_bar(stat = "identity") +
+  theme_minimal() + 
+  xlab('Origin Airport') + 
+  ylab('Demand (Itinerary Volume)') + 
+  geom_text(aes(label = format_nr(paste0(round(countItin/1e3, 0), " K"), dec = 0)), hjust = -0.3) +
+  coord_flip()
+```
+
+```{r}
+newData <- dataWN %>%
+  filter(Origin %in% by_airport$Origin) %>%
+  group_by(DistanceGroup, RPCarrier, Origin) %>%
+  summarise(
+    Demand = n(),
+    Fare = mean(ItinFare)
+  )
+
+aa_dl <- newData %>%
+  ungroup() %>%
+  filter(RPCarrier %in% c("AA", "DL")) # %>%
+# mutate(id = rep(1:40, 2))
+```
+
+```{r}
+# data check
+dataWN %>%
+  filter(RPCarrier == "WN")
+```
+
+
+```{r}
+aa_dl_spread <- spread(aa_dl %>% select(-Fare), RPCarrier, Demand, sep = "Demand") %>%
+  mutate(id = paste0(DistanceGroup, Origin))
+
+aa_dl_fare <- spread(aa_dl %>% select(-Demand), RPCarrier, Fare, sep = "Fare") %>%
+  mutate(id = paste0(DistanceGroup, Origin))
+
+# join both
+df <- aa_dl_spread %>%
+  left_join(aa_dl_fare %>% select(id, RPCarrierFareAA, RPCarrierFareDL), by = c("id"))
+```
+
+## AA is the subject
+
+```{r}
+lm.CP <- lm(log(RPCarrierDemandAA) ~ log(RPCarrierFareDL) + log(RPCarrierFareAA), data = df)
+summary(lm.CP)
+```
+
+```{r}
+vif(lm.CP)
+```
+
+* Adding DistanceGroup alone isn't suggestive as it takes up the variance.
+
+```{r}
+# Function to get a specific airline's RoundTrip (1/0) data by Origin (Top 10)
+data_munge <- function(df, RT, Carrier) {
+  newData <- df %>%
+    filter(Origin %in% by_airport$Origin) %>%
+    group_by(DistanceGroup, RPCarrier, RoundTrip, Origin) %>%
+    summarise(
+      Demand = n(),
+      Fare = mean(ItinFare)
+    )
+
+  aa_dl <- newData %>%
+    ungroup() %>%
+    filter(RoundTrip == RT & RPCarrier %in% c(Carrier)) %>%
+    mutate(id = paste0(DistanceGroup, RoundTrip, Origin))
+
+  names(aa_dl)[names(aa_dl) == "Demand"] <- paste0("RPCarrierDemand", Carrier)
+  names(aa_dl)[names(aa_dl) == "Fare"] <- paste0("RPCarrierFare", Carrier)
+
+
+  return(aa_dl)
+}
+```
+
+
+```{r}
+# sample run
+data_munge(dataWN, 1, "AA")
+```
+
+```{r}
+dfAA <- rbind(
+  data_munge(dataWN, 1, "AA"),
+  data_munge(dataWN, 0, "AA")
+)
+
+
+dfDL <- rbind(
+  data_munge(dataWN, 1, "DL"),
+  data_munge(dataWN, 0, "DL")
+)
+
+dfUA <- rbind(
+  data_munge(dataWN, 1, "UA"),
+  data_munge(dataWN, 0, "UA")
+)
+
+dfWN <- rbind(
+  data_munge(dataWN, 1, "WN"),
+  data_munge(dataWN, 0, "WN")
+)
+
+dfFSC <- dfWN %>%
+  left_join(dfAA %>% dplyr::select(id, RPCarrierDemandAA, RPCarrierFareAA), by = c("id")) %>%
+  left_join(dfUA %>% dplyr::select(id, RPCarrierDemandUA, RPCarrierFareUA), by = c("id")) %>%
+  left_join(dfDL %>% dplyr::select(id, RPCarrierDemandDL, RPCarrierFareDL), by = c("id"))
+```
+
+
+## WN is the subject - FSC
+
+
+```{r}
+# data transformation
+dfFSC <- drop_na(dfFSC)
+
+nrow(dfFSC)
+farecols <- colnames(dfFSC)[(grepl("Fare", colnames(dfFSC)))]
+
+
+dfFSC[, farecols][dfFSC[, farecols] == 0] <- 1
+
+
+lm.CP <- lm(log(RPCarrierDemandWN) ~ log(RPCarrierFareWN) + RoundTrip, data = dfFSC)
+summary(lm.CP)
+```
+
+```{r}
+# data transformation
+dfFSC <- drop_na(dfFSC)
+
+nrow(dfFSC)
+farecols <- colnames(dfFSC)[(grepl("Fare", colnames(dfFSC)))]
+
+
+dfFSC[, farecols][dfFSC[, farecols] == 0] <- 1
+
+
+lm.CP <- lm(log(RPCarrierDemandWN) ~ log(RPCarrierFareWN) + log(RPCarrierFareUA) + RoundTrip, data = dfFSC)
+summary(lm.CP)
+```
+
+```{r}
+# data transformation
+dfFSC <- drop_na(dfFSC)
+
+nrow(dfFSC)
+farecols <- colnames(dfFSC)[(grepl("Fare", colnames(dfFSC)))]
+
+
+dfFSC[, farecols][dfFSC[, farecols] == 0] <- 1
+
+
+lm.CP <- lm(log(RPCarrierDemandWN) ~ log(RPCarrierFareWN) + log(RPCarrierFareUA) + log(RPCarrierFareAA) + RoundTrip, data = dfFSC)
+summary(lm.CP)
+```
+
+```{r}
+# data transformation
+dfFSC <- drop_na(dfFSC)
+
+nrow(dfFSC)
+farecols <- colnames(dfFSC)[(grepl("Fare", colnames(dfFSC)))]
+
+
+dfFSC[, farecols][dfFSC[, farecols] == 0] <- 1
+
+
+lm.CP <- lm(log(RPCarrierDemandWN) ~ log(RPCarrierFareWN) + log(RPCarrierFareUA) + log(RPCarrierFareAA) + log(RPCarrierFareDL) + RoundTrip, data = dfFSC)
+summary(lm.CP)
+```
+
+* Neither a complement nor a substitute
+
+```{r}
+vif(lm.CP)
+```
+
+## LCC
+
+```{r}
+dataLCC <- ticket_19 %>%
+  filter(BulkFare == "0" & DollarCred == "1" & RPCarrier %in% c("B6", "WN", "AS", "G4", "NK"))
+```
+
+## Itinerary count by origin Airport ID
+
+```{r}
+by_airport <- dataLCC %>%
+  group_by(Origin) %>%
+  summarise(countItin = n()) %>%
+  ungroup() %>%
+  mutate(percCount = countItin * 100 / sum(countItin)) %>%
+  arrange(desc(countItin)) %>%
+  slice(1:10)
+```
+
+
+```{r}
+# slice(1:10)
+
+by_airport %>%
+  ggplot(aes(x = reorder(Origin, countItin), y = countItin)) +
+  geom_bar(stat = "identity") +
+  theme_minimal() +
+  geom_text(aes(label = format_nr(countItin, dec = 0)), hjust = -0.3) +
+  coord_flip()
+```
+
+
+```{r}
+dfB6 <- rbind(
+  data_munge(dataLCC, 1, "B6"),
+  data_munge(dataLCC, 0, "B6")
+)
+
+
+dfWN <- rbind(
+  data_munge(dataLCC, 1, "WN"),
+  data_munge(dataLCC, 0, "WN")
+)
+
+dfAS <- rbind(
+  data_munge(dataLCC, 1, "AS"),
+  data_munge(dataLCC, 0, "AS")
+)
+
+dfG4 <- rbind(
+  data_munge(dataLCC, 1, "G4"),
+  data_munge(dataLCC, 0, "G4")
+)
+
+dfNK <- rbind(
+  data_munge(dataLCC, 1, "NK"),
+  data_munge(dataLCC, 0, "NK")
+)
+
+dfLCC <- dfWN %>%
+  left_join(dfB6 %>% select(id, RPCarrierDemandB6, RPCarrierFareB6), by = c("id")) %>%
+  left_join(dfAS %>% select(id, RPCarrierDemandAS, RPCarrierFareAS), by = c("id")) %>%
+  left_join(dfNK %>% select(id, RPCarrierDemandNK, RPCarrierFareNK), by = c("id")) %>%
+  left_join(dfG4 %>% select(id, RPCarrierDemandG4, RPCarrierFareG4), by = c("id"))
+```
+
+### Southwest is the subject
+
+### Useful
+
+```{r}
+lm.CP <- lm(log(RPCarrierDemandWN) ~ log(RPCarrierFareWN)  + RoundTrip, data = dfLCC)
+summary(lm.CP)
+```
+
+```{r}
+lm.CP <- lm(log(RPCarrierDemandWN) ~ log(RPCarrierFareWN)  +  log(RPCarrierFareB6) +  RoundTrip, data = dfLCC)
+summary(lm.CP)
+```
+
+```{r}
+lm.CP <- lm(log(RPCarrierDemandWN) ~ log(RPCarrierFareWN)  +  log(RPCarrierFareB6) + log(RPCarrierFareAS) +  RoundTrip, data = dfLCC)
+summary(lm.CP)
+```
+
+```{r}
+lm.CP <- lm(log(RPCarrierDemandWN) ~ log(RPCarrierFareWN)  +  log(RPCarrierFareB6) + log(RPCarrierFareAS) + log(RPCarrierFareG4) +  RoundTrip, data = dfLCC)
+summary(lm.CP)
+```
+
+* Other competitors price change doesn't have affect on southwest's demand
+
+
+```{r}
+vif(lm.CP)
+```
+
+
+```{r}
+lm.CP <- lm(log(RPCarrierDemandWN) ~ log(RPCarrierFareWN)  +  log(RPCarrierFareB6) + log(RPCarrierFareAS) + log(RPCarrierFareG4) +  log(RPCarrierFareNK) + RoundTrip, data = dfLCC)
+summary(lm.CP)
+```
+
+### Jet Blue is the subject
+
+```{r}
+lm.CP <- lm(log(RPCarrierDemandB6) ~ log(RPCarrierFareB6)*DistanceGroup , data = dfLCC)
+summary(lm.CP)
+```
+* Carier accounts for 15% variance
+* Origin accounts for 20% variance

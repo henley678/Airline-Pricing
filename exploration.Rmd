@@ -1,0 +1,422 @@
+---
+title: "exploration"
+author: "Henry"
+date: '`r format(Sys.Date(), "%Y-%B-%d")`'
+output: 
+  html_document:
+    highlight: zenburn
+    theme: united
+    df_print: paged
+    toc: yes
+    code_folding: hide
+    code_download: true
+    fig_width: 17
+    fig_height: 7
+---
+
+<style>
+slides > slide.backdrop {
+  background: white;
+}
+</style>
+
+<style>
+.column-left{
+  float: left;
+  width: 76%;
+  text-align: left;
+}
+.column-right{
+  float: right;
+  width: 24%;
+  text-align: right;
+}
+</style>
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(ggplot2)
+library(radiant)
+library(lubridate)
+library(readxl)
+library(broom)
+library(forcats)
+# Write xlsx
+if (!require("xlsx")) install.packages("xlsx")
+# library(xlsx)
+
+# Time series
+library(xts)
+
+# VIF
+library(car)
+
+# Coefficient
+if (!require("coefplot")) install.packages("coefplot")
+library(coefplot)
+
+
+# Correlation
+library(Hmisc)
+```
+
+
+```{r}
+
+carrier_names <- readRDS('~/git/airline-pricing/data/carrier_names.rds')
+# read and Change data types to the appropriate ones
+ticket_19 <- readRDS('~/git/airline-pricing/data/ticket_2019.rds') %>%
+mutate(
+    Quarter = as.factor(Quarter),     
+    RoundTrip = as.factor(RoundTrip),
+         OnLine = as.factor(OnLine),
+         BulkFare = as.factor(BulkFare),
+         DistanceGroup = as.factor(DistanceGroup),
+         ItinGeoType = as.factor(ItinGeoType),
+    RPCarrierCat = ifelse(RPCarrier %in% c('HA', 'DL', 'AA', 'UA'), "Full-service", 
+                          ifelse(RPCarrier %in% c('G4', 'B6', 'WN', 'F9', 'NK'), "Low-cost", "All-others")))
+
+
+ticket_19 <-   ticket_19 %>% 
+  filter(BulkFare == '0' & DollarCred == '1')
+
+# couponWithDest <- readRDS('~/git/airline-pricing/data/couponWithDest.rds')
+# # join destination to each itinerary
+# ticket_19 <- ticket_19 %>%
+#   left_join(couponWithDest %>% select(ITIN_ID, DEST), by = c('ItinID' = 'ITIN_ID' ) )
+
+```
+
+```{r}
+glimpse(ticket_19)
+```
+
+## Number of different carriers
+
+```{r}
+table(ticket_19$RPCarrier)
+```
+
+## Every itinerary is distinct
+
+```{r}
+length(unique(ticket_19$ItinID))
+```
+
+## Avg. fare across carriers
+
+```{r}
+by_carrier <- ticket_19 %>%
+  group_by(RPCarrierCat, RPCarrier) %>%
+  summarise(meanFare = mean(ItinFare),
+            revenue  = round(sum(ItinFare)/1e6,0))
+
+by_carrier %>%
+  ggplot(aes(x = reorder(RPCarrier, meanFare), y = meanFare)) + 
+  geom_bar(stat='identity') + 
+  theme_minimal() +
+  geom_text(aes(label = format_nr(meanFare, dec = 2)), hjust = -0.3) + 
+  coord_flip() 
+
+```
+
+## Annual revenue comparison
+
+```{r}
+by_carrier %>%
+  ggplot(aes(x = reorder(RPCarrier, revenue), y = revenue, color = RPCarrierCat, fill = RPCarrierCat)) + 
+  geom_bar(stat='identity') + 
+  theme_minimal() +
+  xlab('Carrier') + 
+  geom_text(aes(label = format_nr(paste0(revenue, " M"), dec = 0)), hjust = -0.3) + 
+  coord_flip() 
+```
+
+* https://en.wikipedia.org/wiki/List_of_low-cost_airlines
+* https://blog.yieldr.com/meet-the-full-service-airlines-of-the-world-infographic/
+* Hawaii Airline is the luxury type
+* Delta and United airlines stand top in terms of avg. fare charged and total revenue generated. This implies they are able to charge as well get the tickets sold (refer to frequency count below)
+
+### Revenue comparison across quarter
+
+
+```{r}
+rev_by_carrier_quarter <- ticket_19 %>%
+  group_by(Quarter, RPCarrier) %>%
+  summarise(meanFare = mean(ItinFare),
+            revenue  = round(sum(ItinFare)/1e6, 2))
+rev_by_carrier_quarter %>%
+  ggplot(aes(x = reorder(RPCarrier, revenue), y = revenue)) + 
+  facet_wrap(~Quarter) + 
+  geom_bar(stat='identity') + 
+  theme_minimal() +
+  geom_text(aes(label = format_nr(paste0(revenue, " M"), dec = 2)), hjust = -0.3) + 
+  coord_flip() 
+```
+
+* Temporally (by quarter) there is not much change in the revenue generated
+
+## Number of Round Trip Itineraries - across carriers
+
+```{r}
+table(ticket_19$RoundTrip)
+```
+```{r}
+by_roundtrip <- ticket_19 %>%
+  group_by(RoundTrip, RPCarrier) %>%
+  summarise(countItin = n(),
+            meanFare = mean(ItinFare)) %>%
+  arrange(desc(countItin))
+
+by_roundtrip
+  
+```
+
+### Round trip fare comparison
+
+```{r}
+by_roundtrip %>%
+  filter(RoundTrip == 1) %>%
+  ggplot(aes(x = reorder(RPCarrier, meanFare), y = meanFare)) + 
+  geom_bar(stat='identity') + 
+  theme_minimal() +
+  geom_text(aes(label = format_nr(meanFare, dec = 2)), hjust = -0.3) + 
+  coord_flip() 
+```
+
+### Non round trip fare comparison
+
+```{r}
+by_roundtrip %>%
+  filter(RoundTrip == 0) %>%
+  ggplot(aes(x = reorder(RPCarrier, meanFare), y = meanFare)) + 
+  geom_bar(stat='identity') + 
+  theme_minimal() +
+  geom_text(aes(label = format_nr(meanFare, dec = 2)), hjust = -0.3) + 
+  coord_flip() 
+```
+
+## Carrier names
+
+```{r}
+carrier_names
+```
+
+## Passenger count
+
+```{r}
+by_carrier_quarter <- ticket_19 %>%
+  group_by(Quarter, RPCarrier) %>%
+  summarise(Passengers = sum(Passengers), 
+            countItin = n(), 
+            AvgPassPerItin = Passengers/countItin,
+            Coupons = sum(Coupons),
+            AvgCoupPerItin = Coupons/countItin)
+
+```
+
+### Passengers across quarters
+
+```{r}
+by_carrier_quarter %>%
+  ggplot(aes(x = RPCarrier, y = Passengers, color = Quarter)) + 
+  geom_bar(stat='identity') +
+  facet_wrap(~Quarter) + 
+  theme_minimal()
+```
+
+* Not much variation in number of passengers across different quarters for each carrier
+
+
+### Number of Passengers per Itinerary
+
+```{r}
+by_carrier_quarter %>%
+  ggplot(aes(x = RPCarrier, y = AvgPassPerItin, color = Quarter)) + 
+  geom_bar(stat='identity') +
+  facet_wrap(~Quarter) + 
+  theme_minimal()
+  
+```
+
+## Coupons distribution
+
+```{r}
+table(ticket_19$Coupons)
+```
+
+### Which carriers offer highest coupons per itinerary?
+
+```{r}
+by_carrier_quarter %>% 
+  ggplot(aes(x = RPCarrier, y = AvgCoupPerItin, color = Quarter)) + 
+  geom_bar(stat='identity') +
+  facet_wrap(~Quarter) + 
+  geom_text(aes(label = format_nr(AvgCoupPerItin, dec = 2)), vjust = -0.8) + 
+  theme_minimal()
+```
+
+* There us not much variation across different times (quarters) but some variation across carriers.
+
+## Source - Destination Trips
+
+```{r}
+# All within US
+table(ticket_19$OriginCountry)
+```
+
+### Number of different airport codes (Origins)
+
+```{r}
+
+length(table(ticket_19$Origin))
+length(unique(ticket_19$Origin))
+```
+
+### Top 5 origin codes for RoundTrip == 1
+
+```{r}
+by_origin <- ticket_19 %>%
+  filter(RoundTrip == 1) %>%
+  group_by(Quarter, Origin) %>%
+  summarise(countItin = n()) %>%
+  arrange(desc(countItin)) %>%
+  slice(1:5)
+  
+by_origin %>%
+  ggplot(aes(x = reorder(Origin, countItin), y = countItin, color = Quarter)) + 
+  geom_bar(stat='identity') +
+  facet_wrap(~Quarter) + 
+  coord_flip() + 
+  theme_minimal()
+  
+```
+
+```{r}
+ticket_19 %>%
+  filter(BulkFare == 1) %>%
+  slice(1:500)
+```
+
+## No. of distance groups
+
+```{r}
+table(ticket_19$DistanceGroup)
+length(table(ticket_19$DistanceGroup))
+```
+
+### Variation in mean fares across distance groups in the big 3 players - UA, DL, AA
+
+```{r}
+# big 3
+by_distanceGroup <- ticket_19 %>%
+  filter(RPCarrier %in% c('AA', "DL", 'UA', 'WN', 'B6', 'F9', 'G4', 'NK')) %>%
+  group_by(RPCarrier, DistanceGroup) %>%
+  summarise(countItin = n(),
+            meanFare = mean(ItinFare))
+
+by_distanceGroup %>%
+  ggplot(aes(x = reorder(DistanceGroup, meanFare), y = meanFare)) + 
+  geom_point() + 
+  #geom_bar(stat='identity') + 
+  facet_wrap(~RPCarrier, ncol = 4)  +
+  xlab('Distance Group') + 
+  ylab('Mean Fare (USD)') + 
+  theme_minimal() +
+  geom_text(aes(label = format_nr(round(meanFare,2), dec = 2)), hjust = -0.3) + 
+  coord_flip() 
+
+```
+
+### Variation in mean fares across distance groups in the LCC - B6, NK, WN, AS, G4
+
+```{r}
+
+by_distanceGroup <- ticket_19 %>%
+  filter(RPCarrier %in% c('AS', "B6", 'G4', 'NK', 'WN')) %>%
+  group_by(RPCarrier, DistanceGroup) %>%
+  summarise(countItin = n(),
+            meanFare = mean(ItinFare))
+
+by_distanceGroup %>%
+  ggplot(aes(x = reorder(DistanceGroup, meanFare), y = meanFare)) + 
+  geom_bar(stat='identity') + 
+  facet_wrap(~RPCarrier)  +
+  theme_minimal() +
+  geom_text(aes(label = format_nr(paste0(meanFare), dec = 2)), hjust = -0.3) + 
+  coord_flip() 
+
+```
+
+* Some airlines just don't offer in every single distance group
+* The price variation is not as high as the distance group number increases.
+
+## No. of unique routes
+
+```{r}
+length(unique(ticket_19$DEST))
+
+check <- ticket_19[1:500, ]
+```
+
+
+## No. of origin Airport ID
+
+```{r}
+length(table(ticket_19$OriginAirportID))
+```
+
+## No. of origin Airport ID
+
+```{r}
+length(table(ticket_19$OriginAirportSeqID))
+```
+
+
+## No. of origin City Market ID
+
+```{r}
+length(table(ticket_19$OriginCityMarketID))
+```
+
+## No. of different passengers
+
+```{r}
+ticket_19 %>%
+  filter(Passengers == 928)
+```
+
+# Southwest
+
+```{r}
+dataWN <- ticket_19 %>%
+  filter(BulkFare == '0' & DollarCred == '1' & RPCarrier == 'WN')
+```
+
+## Itinerary count by origin Airport ID
+
+```{r}
+by_airport <- dataWN %>%
+  group_by(Origin) %>%
+  summarise(countItin = n()) %>%
+  ungroup() %>%
+  mutate(percCount = countItin*100/sum(countItin)) %>%
+  # arrange(desc(countItin)) %>%
+  slice(1:10)
+
+```
+
+
+```{r}
+# slice(1:10)
+
+by_airport %>%
+  ggplot(aes(x = reorder(Origin, countItin), y = countItin)) + 
+  geom_bar(stat='identity') + 
+  theme_minimal() +
+  geom_text(aes(label = format_nr(countItin, dec = 2)), hjust = -0.3) + 
+  coord_flip() 
+```
+
+

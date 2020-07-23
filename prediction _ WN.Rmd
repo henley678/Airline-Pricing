@@ -1,0 +1,310 @@
+---
+title: "exploration"
+author: "Henry"
+date: '`r format(Sys.Date(), "%Y-%B-%d")`'
+output: 
+  html_document:
+    highlight: zenburn
+    theme: united
+    df_print: paged
+    toc: yes
+    code_folding: hide
+    code_download: true
+    fig_width: 17
+    fig_height: 7
+---
+
+<style>
+slides > slide.backdrop {
+  background: white;
+}
+</style>
+
+<style>
+.column-left{
+  float: left;
+  width: 76%;
+  text-align: left;
+}
+.column-right{
+  float: right;
+  width: 24%;
+  text-align: right;
+}
+</style>
+
+### Load packages
+
+```{r setup, include=FALSE}
+packages <- c('ggplot2','dplyr','tidyr','gridExtra', 'ggthemes', 'radiant', 'readr', 'tidyverse', 'lubridate', 
+              'pROC', 'caret', 'neuralnet', 'randomForest', 'e1071', 'rpart', 'xgboost', 'pls', 'GGally', 'lm.beta', 
+              'gridExtra', 'ggthemes', 'devtools', 'visdat', 'DataExplorer', 'data.table', 'bigmemory', 'biglm', 'biganalytics',
+              'bigtabulate', 'DMwR', 'broom', 'forcats', 'xts', 'car', 'coefplot', 'Hmisc', 'mlbench')
+
+for (p in packages) {
+  if ((p %in% rownames(installed.packages())) == FALSE) {
+    install.packages(p, dependencies = TRUE)
+  } 
+  library(p, character.only = TRUE)
+}
+```
+
+```{r}
+carrier_names <- readRDS('~/git/airline-pricing/data/carrier_names.rds')
+ticket_19 <- readRDS('~/git/airline-pricing/data/ticket_2019.rds') 
+# coupon_19 <- readRDS('~/git/airline-pricing/data/coupon_19.rds')
+ticket_19$X <- NULL
+```
+
+### DollarCred
+
+```{r}
+dollarcred_1 <- ticket_19 %>%
+  filter(BulkFare == '0' & DollarCred == '1') %>% 
+  mutate(psnrgrp = cut(Passengers, breaks=c(0, 1, 2, 3, 5, 10, 50, 100, 500, 1000),
+                             include.lowest=T,
+                             labels = c('= 1', '=2', '=3', '4-5', '6-10', '11-50', '51-100', '101-500', '>500')))
+
+head(dollarcred_1, 10)
+```
+
+### Coupons and passenger group
+
+```{r}
+psnr_coupon1 <- dollarcred_1 %>%
+  group_by(psnrgrp) %>%
+  summarise(ttl_coupon = sum(Coupons)) %>%
+  arrange(desc(ttl_coupon), psnrgrp)
+
+psnr_coupon2 <- dollarcred_1 %>%
+  group_by(psnrgrp, Coupons) %>%
+  summarise(ttl_coupon = sum(Coupons)) %>%
+  arrange(psnrgrp, desc(Coupons))
+```
+
+### Round trip 1/0 mean fare & count of itineraries
+
+```{r}
+# by_roundtrip <- dollarcred_1 %>%
+#   group_by(RoundTrip, RPCarrier) %>%
+#   summarise(countItin = n(),
+#             meanFare = mean(ItinFare)) %>%
+#   arrange(desc(countItin))
+# 
+# by_roundtrip %>%
+#   filter(RoundTrip == 1) %>%
+#   ggplot(aes(x = reorder(RPCarrier, meanFare), y = meanFare)) + 
+#   geom_bar(stat='identity') + 
+#   theme_minimal() +
+#   geom_text(aes(label = format_nr(meanFare, dec = 2)), hjust = -0.3) + 
+#   coord_flip() 
+# 
+# by_roundtrip %>%
+#   filter(RoundTrip == 0) %>%
+#   ggplot(aes(x = reorder(RPCarrier, meanFare), y = meanFare)) + 
+#   geom_bar(stat='identity') + 
+#   theme_minimal() +
+#   geom_text(aes(label = format_nr(meanFare, dec = 2)), hjust = -0.3) + 
+#   coord_flip() 
+# 
+# by_roundtrip %>%
+#   filter(RoundTrip == 1) %>%
+#   ggplot(aes(x = reorder(RPCarrier, countItin), y = countItin)) + 
+#   geom_bar(stat='identity') + 
+#   theme_minimal() +
+#   geom_text(aes(label = format_nr(countItin, dec = 2)), hjust = -0.3) + 
+#   coord_flip() 
+# 
+# by_roundtrip %>%
+#   filter(RoundTrip == 0) %>%
+#   ggplot(aes(x = reorder(RPCarrier, countItin), y = countItin)) + 
+#   geom_bar(stat='identity') + 
+#   theme_minimal() +
+#   geom_text(aes(label = format_nr(countItin, dec = 2)), hjust = -0.3) + 
+#   coord_flip() 
+```
+
+### Predictive model for pricing (WN - LAX)
+
+```{r}
+WN_LAX <- dollarcred_1 %>%
+  filter(RPCarrier == 'WN' & Origin == 'LAX') %>%
+  mutate(Quarter = as.factor(Quarter),
+         RoundTrip = as.factor(RoundTrip),
+         OnLine = as.factor(OnLine),
+         DistanceGroup = as.factor(DistanceGroup),
+         ItinGeoType = as.factor(ItinGeoType),
+         psnrgrp = as.factor(psnrgrp))
+```
+
+```{r}
+# Split train / test / validation
+idx <- sample(seq(1, 2), size = nrow(WN_LAX), replace = TRUE, prob = c(0.7, 0.3))
+train <- WN_LAX[idx == 1,]
+test <- WN_LAX[idx == 2,]
+```
+
+```{r}
+# Linear regression - baseline
+model <- lm(ItinFare ~ Coupons + Quarter + RoundTrip + OnLine + FarePerMile + Passengers + Distance + DistanceGroup + 
+              MilesFlown + ItinGeoType + psnrgrp, data = train)
+m <- summary(model)  ### model summary
+m
+print(paste0("The R-squared is ", round((m$r.squared * 100), 2), '%.'))
+
+# Make predictions on the test data
+Pred <- predict(model, test)  
+test <- test %>%
+  mutate(lm1_pred = Pred)
+actuals_pred <- data.frame(cbind(actual = test$ItinFare, predicted = Pred))  # make actuals_pred dataframe
+# head(actuals_pred)
+
+# Compute the average prediction error RMSE
+rmse_lm1 <- RMSE(test$ItinFare, Pred)
+print(paste0("The RMSE is ", round((rmse_lm1), 2), '.'))
+```
+
+```{r}
+# Linear regression - 2nd model
+model <- lm(ItinFare ~ Coupons + Quarter + OnLine + FarePerMile + Passengers + Distance + DistanceGroup + 
+              MilesFlown + ItinGeoType + Coupons * Quarter + Coupons * OnLine +
+              Coupons * Distance + Coupons * DistanceGroup +  Coupons * ItinGeoType + Passengers * Distance + 
+              Passengers * DistanceGroup, data = train)
+m <- summary(model)  ### model summary
+m
+print(paste0("The R-squared is ", round((m$r.squared * 100), 2), '%.'))
+
+# Make predictions on the test data
+Pred <- predict(model, test)  
+test <- test %>%
+  mutate(lm2_pred = Pred)
+actuals_pred <- data.frame(cbind(actual = test$ItinFare, predicted = Pred))  # make actuals_pred dataframe
+# head(actuals_pred)
+
+# Compute the average prediction error RMSE
+rmse_lm2 <- RMSE(test$ItinFare, Pred)
+print(paste0("The RMSE is ", round((rmse_lm2), 2), '.'))
+```
+
+```{r}
+# Linear regression - 3rd model
+model <- train(ItinFare ~ Coupons + Quarter + OnLine + FarePerMile + Passengers + Distance + DistanceGroup + MilesFlown +
+                 ItinGeoType + Coupons * Quarter + Coupons * OnLine + Coupons * psnrgrp + Coupons * Distance + 
+                 Coupons * DistanceGroup +  Coupons * ItinGeoType + Passengers * Distance + Passengers * DistanceGroup + 
+                 psnrgrp, data = train, "lm")
+m <- summary(model)  ### model summary
+m
+print(paste0("The R-squared is ", round((m$r.squared * 100), 2), '%.'))
+
+# Make predictions on the test data
+Pred <- predict(model, test)  
+test <- test %>%
+  mutate(lm3_pred = Pred)
+actuals_pred <- data.frame(cbind(actual = test$ItinFare, predicted = Pred))  # make actuals_pred dataframe
+# head(actuals_pred)
+
+# Compute the average prediction error RMSE
+rmse_lm3 <- RMSE(test$ItinFare, Pred)
+print(paste0("The RMSE is ", round((rmse_lm3), 2), '.'))
+```
+
+```{r}
+# Xgboost model
+model <- train(ItinFare ~ Coupons + Quarter + RoundTrip + OnLine + FarePerMile + Passengers + Distance + DistanceGroup + 
+              MilesFlown + ItinGeoType + psnrgrp, data = train, method = "xgbTree", trControl = trainControl("cv", number = 5))
+## summary(model) ### model summary
+
+# Best tuning parameter
+model$bestTune
+
+# Make predictions on the test data
+Pred <- predict(model, test)
+test <- test %>%
+  mutate(xgb_pred = Pred)
+actuals_pred <- data.frame(cbind(actual = test$ItinFare, predicted = Pred))  # make actuals_pred dataframe
+# head(actuals_pred)
+
+# Compute the prediction Accuracy
+accuracy <- cor(actuals_pred) 
+accuracy_xgb <- accuracy[1,2]
+print(paste0("The accuracy is ", round((accuracy_xgb * 100), 2), '%.'))
+
+# Compute the prediction ROC
+roc = roc(test$ItinFare, test$xgb_pred)
+auc_xgb <- auc(roc)
+print(paste0("The AUC is ", round((auc_xgb * 100), 2), '%.'))
+
+# Compute the average prediction error RMSE
+rmse_xgb <- RMSE(test$ItinFare, Pred)
+print(paste0("The RMSE is ", round((rmse_xgb), 2), '.'))
+```
+
+```{r}
+# Principal components regression model
+model <- pcr(ItinFare ~ Coupons + Quarter + RoundTrip + OnLine + FarePerMile + Passengers + Distance + DistanceGroup + 
+              MilesFlown + ItinGeoType + psnrgrp, data = train, validation = "CV")
+## summary(model) ### model summary
+
+# Make predictions on the test data
+Pred <- predict(model, test, ncomp = 23)
+test <- test %>%
+  mutate(pcr_pred = Pred)
+actuals_pred <- data.frame(cbind(actual = test$ItinFare, predicted = Pred))  # make actuals_pred dataframe
+head(actuals_pred)
+
+# Compute the prediction Accuracy
+accuracy <- cor(actuals_pred) 
+accuracy_pcr <- accuracy[1,2]
+print(paste0("The accuracy is ", round((accuracy_pcr * 100), 2), '%.'))
+
+# Compute the prediction ROC
+roc = roc(test$ItinFare, test$pcr_pred)
+auc_pcr <- auc(roc)
+print(paste0("The AUC is ", round((auc_pcr * 100), 2), '%.'))
+
+# Compute the average prediction error RMSE
+rmse_pcr <- RMSE(test$ItinFare, Pred)
+print(paste0("The RMSE is ", round((rmse_pcr), 2), '.'))
+```
+
+```{r}
+# Compare model performance
+df <- data.frame("model" = c('xgb', 'pcr'),
+                 "accuracy" = c(accuracy_xgb, accuracy_pcr),
+                 "roc" = c(auc_xgb, auc_pcr),
+                 "rmse" = c(rmse_xgb, rmse_pcr))
+df
+
+ggplot(df, aes(x = model, y = accuracy, fill = model)) +
+  geom_bar(stat = "identity") +
+  labs(
+    x = "Model",
+    y = "Accuracy (%)"
+  ) +
+  geom_text(aes(label= round(accuracy * 100, 2)), vjust=-0.3, size=3.5)
+
+ggplot(df, aes(x = model, y = roc, fill = model)) +
+  geom_bar(stat = "identity") +
+  labs(
+    x = "Model",
+    y = "ROC (%)"
+  ) +
+  geom_text(aes(label= round(roc * 100, 2)), vjust=-0.3, size=3.5)
+
+ggplot(df, aes(x = model, y = rmse, fill = model)) +
+  geom_bar(stat = "identity") +
+  labs(
+    x = "Model",
+    y = "RMSE"
+  ) +
+  geom_text(aes(label= round(rmse, 2)), vjust=-0.3, size=3.5)
+```
+
+```{r}
+# Ensemble model
+## Taking average of predictions
+test$pred_avg<-(test$lm3_pred + test$xgb_pred + test$pcr_pred) / 3
+
+#Taking weighted average of predictions
+test$pred_weighted_avg<-(test$lm3_pred * 0.1)  + (test$xgb_pred * 0.7) + (test$pcr_pred * 0.2)
+```
